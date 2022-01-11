@@ -14,7 +14,9 @@ error HANDLE_ALREADY_CHALLENGED();
 error HANDLE_EMPTY();
 error HANDLE_TAKEN();
 error HANDLE_NOT_TAKEN();
+error HANDLE_TOO_SHORT();
 error TRANSFER_HANDLE_UNAUTHORIZED();
+error WRONG_VALUE();
 
 /** 
   @notice 
@@ -47,6 +49,31 @@ contract JBProjects is ERC721, IJBProjects, JBOperatable {
     The resulting ERC-721 token ID for each project is the newly incremented count value.
   */
   uint256 public override count = 0;
+
+  /** 
+    @notice 
+    The minimum number of bytes a handle must take up to be free.
+
+    @dev
+    Hangles longer than this number of characters are free to claim. 
+    Shorter handles are costly (see maxHandleCost, minHandleLen).
+  */
+  uint8 public constant minFreeHandleBytes = 16;
+
+  /** 
+    @notice 
+    The minimum number of bytes in a handle.
+  */
+  uint8 public constant minHandleBytes = 3;
+
+  /** 
+    @notice 
+    The cost for a handle of mindHandleChars length
+
+    @dev
+    Handle cost scales linearly from freeHandleMinChars to minHandleChars, from 0 to this cost.
+  */
+  uint256 public constant maxHandleCost = 1 ether;
 
   /** 
     @notice 
@@ -130,31 +157,25 @@ contract JBProjects is ERC721, IJBProjects, JBOperatable {
     address _owner,
     bytes32 _handle,
     string calldata _metadataCid
-  ) external override returns (uint256) {
-    // Handle must exist.
-    if (_handle == bytes32(0)) {
-      revert HANDLE_EMPTY();
+  ) external payable override returns (uint256) {
+    // Correct amount of ether must have been sent.
+    if (validHandlePrice(_handle) != msg.value) {
+      revert WRONG_VALUE();
     }
 
-    // Handle must be unique.
-    if (idFor[_handle] != 0 || transferAddressFor[_handle] != address(0)) {
-      revert HANDLE_TAKEN();
-    }
+    // TODO pipe fees?
 
     // Increment the count, which will be used as the ID.
     count++;
 
-    // Mint the project.
-    _safeMint(_owner, count);
-
-    // Store the handle for the project ID.
-    handleOf[count] = _handle;
-
-    // Store the project ID for the handle.
-    idFor[_handle] = count;
+    // Set the handle
+    _setHandleOf(count, _handle);
 
     // Set the URI if one was provided.
     if (bytes(_metadataCid).length > 0) metadataCidOf[count] = _metadataCid;
+
+    // Mint the project.
+    _safeMint(_owner, count);
 
     emit Create(count, _owner, _handle, _metadataCid, msg.sender);
 
@@ -173,26 +194,18 @@ contract JBProjects is ERC721, IJBProjects, JBOperatable {
   */
   function setHandleOf(uint256 _projectId, bytes32 _handle)
     external
+    payable
     override
     requirePermission(ownerOf(_projectId), _projectId, JBOperations.SET_HANDLE)
   {
-    // Handle must exist.
-    if (_handle == bytes32(0)) {
-      revert HANDLE_EMPTY();
-    }
-    // Handle must be unique.
-    if (idFor[_handle] != 0 || transferAddressFor[_handle] != address(0)) {
-      revert HANDLE_TAKEN();
+    // Correct amount of ether must have been sent.
+    if (validHandlePrice(_handle) != msg.value) {
+      revert WRONG_VALUE();
     }
 
-    // Register the change in the resolver.
-    idFor[handleOf[_projectId]] = 0;
+    // TODO pipe fees?
 
-    // Store the handle for the project ID.
-    handleOf[_projectId] = _handle;
-
-    // Store the project ID for the handle.
-    idFor[_handle] = _projectId;
+    _setHandleOf(_projectId, _handle);
 
     emit SetHandle(_projectId, _handle, msg.sender);
   }
@@ -238,33 +251,25 @@ contract JBProjects is ERC721, IJBProjects, JBOperatable {
     bytes32 _newHandle
   )
     external
+    payable
     override
     requirePermission(ownerOf(_projectId), _projectId, JBOperations.SET_HANDLE)
     returns (bytes32 handle)
   {
-    // A new handle must have been provided.
-    if (_newHandle == bytes32(0)) {
-      revert HANDLE_EMPTY();
+    // Correct amount of ether must have been sent.
+    if (validHandlePrice(_newHandle) != msg.value) {
+      revert WRONG_VALUE();
     }
 
-    // The new handle must be available.
-    if (idFor[_newHandle] != 0 || transferAddressFor[_newHandle] != address(0)) {
-      revert HANDLE_TAKEN();
-    }
+    // TODO pipe fees?
 
     // Get a reference to the project's current handle.
     handle = handleOf[_projectId];
 
-    // Remove the project ID for the transferred handle.
-    idFor[handle] = 0;
+    // Set the new handle.
+    _setHandleOf(_projectId, _newHandle);
 
-    // Store the new handle for the project ID.
-    idFor[_newHandle] = _projectId;
-
-    // Store the project ID for the new handle.
-    handleOf[_projectId] = _newHandle;
-
-    // Give the address the power to transfer the current handle.
+    // Give the transferAddress the power to transfer the current handle.
     transferAddressFor[handle] = _transferAddress;
 
     emit TransferHandle(_projectId, _transferAddress, handle, _newHandle, msg.sender);
@@ -370,5 +375,71 @@ contract JBProjects is ERC721, IJBProjects, JBOperatable {
     challengeExpiryOf[_handle] = 0;
 
     emit RenewHandle(_handle, _projectId, msg.sender);
+  }
+
+  //*********************************************************************//
+  // ---------------------- public transactions _----------------------- //
+  //*********************************************************************//
+
+  /** 
+    @notice
+    Validates handle length and returns handle price
+
+    @dev
+    Price goes from 0 to maxHandleCost linearly as handle name goes from 
+    minFreeHandleBytes - 1 to minHandleBytes
+
+    @param handle The handle being validated and priced 
+  */
+
+  function validHandlePrice(bytes32 handle) public pure returns (uint256) {
+    // If the byte at minFreeHandleBytes isn't 0, the handle is long enough to be free
+    if (handle[minFreeHandleBytes] == 0) return 0;
+
+    // Find the first non-zero byte to establish the length of the handle
+    uint256 length;
+    for (uint256 i = minFreeHandleBytes - 1; i >= 0; i--) {
+      if (handle[i] != 0) length = i + 1;
+    }
+
+    // Handle must be longer than minHandleBytes
+    if (length < minHandleBytes) {
+      revert HANDLE_TOO_SHORT();
+    }
+
+    // Calculate price
+    return ((minFreeHandleBytes - length) * maxHandleCost) / (minFreeHandleBytes - minHandleBytes);
+  }
+
+  //*********************************************************************//
+  // ---------------------- private transactions ----------------------- //
+  //*********************************************************************//
+
+  /**
+    @notice 
+    Set the project's handle, replacing any existing handle.
+
+    @param _projectId The ID of the project who's handle is being changed.
+    @param _handle The new unique handle for the project.
+  */
+  function _setHandleOf(uint256 _projectId, bytes32 _handle) private {
+    // Handle must exist.
+    if (_handle == bytes32(0)) {
+      revert HANDLE_EMPTY();
+    }
+
+    // Handle must be unique.
+    if (idFor[_handle] != 0 || transferAddressFor[_handle] != address(0)) {
+      revert HANDLE_TAKEN();
+    }
+
+    // Unassign the project ID's current handle, if it has one.
+    if (idFor[handleOf[_projectId]] != 0) idFor[handleOf[_projectId]] = 0;
+
+    // Store the handle for the project ID.
+    handleOf[_projectId] = _handle;
+
+    // Store the project ID for the handle.
+    idFor[_handle] = _projectId;
   }
 }

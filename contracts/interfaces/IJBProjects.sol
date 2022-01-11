@@ -58,9 +58,9 @@ interface IJBProjects is IERC721 {
     address _owner,
     bytes32 _handle,
     string calldata _metadataCid
-  ) external returns (uint256 id);
+  ) external payable returns (uint256 id);
 
-  function setHandleOf(uint256 _projectId, bytes32 _handle) external;
+  function setHandleOf(uint256 _projectId, bytes32 _handle) external payable;
 
   function setMetadataCidOf(uint256 _projectId, string calldata _metadataCid) external;
 
@@ -68,7 +68,7 @@ interface IJBProjects is IERC721 {
     uint256 _projectId,
     address _transferAddress,
     bytes32 _newHandle
-  ) external returns (bytes32 _handle);
+  ) external payable returns (bytes32 _handle);
 
   function claimHandle(
     bytes32 _handle,
